@@ -8,6 +8,7 @@ mod canon;
 mod motioncam;
 mod per_frame;
 mod segments;
+pub mod o4_repair;
 pub mod splines;
 pub mod optical_correction;
 pub use file_metadata::*;
@@ -80,7 +81,12 @@ pub struct GyroSource {
     pub integration_method: usize,
 
     pub quaternions: Arc<TimeQuat>,
+    #[serde(skip)]
+    pub uncorrected_quaternions: Arc<TimeQuat>,
     pub smoothed_quaternions: Arc<TimeQuat>,
+
+    #[serde(default)]
+    pub o4_repair_regions: Vec<o4_repair::RepairRegion>,
 
     pub use_gravity_vectors: bool,
     pub horizon_lock_integration_method: i32,
@@ -323,7 +329,9 @@ impl GyroSource {
             imu_transforms: self.imu_transforms.clone(),
             integration_method: self.integration_method,
             quaternions: if orientations { self.quaternions.clone() } else { Default::default() },
+            uncorrected_quaternions: Default::default(),
             smoothed_quaternions: Default::default(),
+            o4_repair_regions: self.o4_repair_regions.clone(),
             use_gravity_vectors: self.use_gravity_vectors,
             horizon_lock_integration_method: self.horizon_lock_integration_method,
             max_angles: self.max_angles,
@@ -1027,7 +1035,9 @@ impl GyroSource {
 
     pub fn clear(&mut self) {
         self.quaternions = Default::default();
+        self.uncorrected_quaternions = Default::default();
         self.smoothed_quaternions = Default::default();
+        self.o4_repair_regions.clear();
         self.raw_imu = Default::default();
         self.imu_transforms.imu_rotation = None;
         self.imu_transforms.acc_rotation = None;
@@ -1081,6 +1091,7 @@ impl GyroSource {
 
         if has_quats {
             self.quaternions = Arc::new(self.file_metadata.read().quaternions.clone());
+            self.uncorrected_quaternions = self.quaternions.clone();
             self.integration_method = 0;
         }
 
@@ -1155,6 +1166,27 @@ impl GyroSource {
         }
         drop(file_metadata);
         self.apply_optical_correction();
+        self.uncorrected_quaternions = self.quaternions.clone();
+        if self.is_o4_video() && !self.o4_repair_regions.is_empty() {
+            o4_repair::apply(Arc::make_mut(&mut self.quaternions), &self.o4_repair_regions);
+        }
+    }
+
+    pub fn is_o4_video(&self) -> bool {
+        let md = self.file_metadata.read();
+        let source = md.detected_source.as_deref().unwrap_or("").to_ascii_lowercase();
+        let model = md.camera_identifier.as_ref().map(|id| id.model.to_ascii_lowercase()).unwrap_or_default();
+        source.starts_with("dji o4") || source.starts_with("dji o4p")
+            || (source == "dji" && (model.contains("o4") || model.contains("o 4")))
+    }
+
+    pub fn refresh_o4_repair(&mut self) {
+        if self.uncorrected_quaternions.is_empty() { self.uncorrected_quaternions = self.quaternions.clone(); }
+        if self.uncorrected_quaternions.is_empty() { return; }
+        self.quaternions = self.uncorrected_quaternions.clone();
+        if self.is_o4_video() && !self.o4_repair_regions.is_empty() {
+            o4_repair::apply(Arc::make_mut(&mut self.quaternions), &self.o4_repair_regions);
+        }
     }
 
     /// Composes the correction measured from the video onto freshly integrated quaternions - when it was measured
@@ -1573,6 +1605,7 @@ impl GyroSource {
             && self.integration_method == copy.integration_method
             && self.horizon_lock_integration_method == copy.horizon_lock_integration_method
             && self.use_gravity_vectors == copy.use_gravity_vectors
+            && self.o4_repair_regions == copy.o4_repair_regions
             && self.duration_ms.to_bits() == copy.duration_ms.to_bits()
             // `integrate` reads the filtered readings there are, `apply_transforms` filters them anew
             && (integration == Integration::ApplyTransforms || Arc::ptr_eq(&self.raw_imu, &copy.raw_imu))
@@ -1582,6 +1615,7 @@ impl GyroSource {
     fn take_integration(&mut self, from: &mut Self) {
         std::mem::swap(&mut self.raw_imu, &mut from.raw_imu);
         std::mem::swap(&mut self.quaternions, &mut from.quaternions);
+        std::mem::swap(&mut self.uncorrected_quaternions, &mut from.uncorrected_quaternions);
         self.optical_correction_applied = from.optical_correction_applied;
         self.optical_uncorrected_checksum = from.optical_uncorrected_checksum;
         self.motion_from_video = from.motion_from_video;
@@ -1745,6 +1779,12 @@ impl GyroSource {
         hasher.write_usize(self.raw_imu.len());
         hasher.write_usize(file_metadata.raw_imu.len());
         hasher.write_usize(self.quaternions.len());
+        for r in &self.o4_repair_regions {
+            hasher.write_u64(r.start_ms.to_bits());
+            hasher.write_u64(r.end_ms.to_bits());
+            hasher.write_u8(r.mode as u8);
+            hasher.write_u64(r.strength.to_bits());
+        }
         hasher.write_usize(file_metadata.quaternions.len());
         hasher.write_usize(file_metadata.image_orientations.as_ref().map(|v| v.len()).unwrap_or_default());
         hasher.write_usize(file_metadata.lens_positions.len());

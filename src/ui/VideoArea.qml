@@ -26,6 +26,8 @@ Item {
     property alias infoMessages: infoMessages;
     property alias gridGuide: gridGuide;
     property alias secondPreview: secondPreview;
+    property bool o4CompareShown: false;
+    onLoadedFileUrlChanged: o4CompareShown = false;
     property alias opticalPointEditor: opticalPointEditor;
 
     property int outWidth: window? window.exportSettings.outWidth : 0;
@@ -43,7 +45,7 @@ Item {
     property real additionalTopMargin: 0;
     // While the motion data loads, the video plays unstabilized instead of being covered until it's loaded
     readonly property bool showStabilized: stabEnabledBtn.checked && !controller.loading_gyro_in_progress;
-    onShowStabilizedChanged: { controller.stab_enabled = showStabilized; vid.forceRedraw(); vid.fovChanged(); }
+    onShowStabilizedChanged: { if (!showStabilized) o4CompareShown = false; controller.stab_enabled = showStabilized; vid.forceRedraw(); vid.fovChanged(); }
     Component.onCompleted: controller.stab_enabled = showStabilized; // The core starts with it enabled
     property var mergedFiles: [];
 
@@ -648,8 +650,8 @@ Item {
 
         Grid {
             readonly property bool vertical: vidParentParent.height - vidParent.height * 2 > vidParentParent.width - vidParent.width * 2;
-            columns: secondPreview.visible? (vertical? 1 : 2) : 1;
-            rows:    secondPreview.visible? (vertical? 2 : 1) : 1;
+            columns: (secondPreview.visible || compareParent.visible)? (vertical? 1 : 2) : 1;
+            rows:    (secondPreview.visible || compareParent.visible)? (vertical? 2 : 1) : 1;
             anchors.centerIn: parent;
             spacing: 10 * dpiScale;
             Item {
@@ -673,6 +675,14 @@ Item {
 
                 MDKVideo {
                     id: vid;
+                    BasicText {
+                        visible: root.o4CompareShown;
+                        text: qsTr("After repair");
+                        anchors.left: parent.left;
+                        anchors.top: parent.top;
+                        color: "white";
+                        z: 20;
+                    }
                     visible: opacity > 0;
                     opacity: loaded? 1 : 0;
                     Ease on opacity { }
@@ -722,10 +732,17 @@ Item {
                     }
 
                     onCurrentFrameChanged: {
+                        const comparison = compareLoader.item;
+                        if (root.o4CompareShown && comparison && comparison.videoWidth > 0 && Math.abs(comparison.timestamp - timestamp) > 80) comparison.setTimestamp(timestamp);
                         fovChanged();
                         controller.update_keyframe_values(timestamp);
                         window.motionData.orientationIndicator.updateOrientation(timeline.position * timeline.durationMs * 1000);
                         updateTurnSpeed();
+                    }
+                    onPlayingChanged: {
+                        const comparison = compareLoader.item;
+                        if (!comparison) return;
+                        if (playing) comparison.play(); else comparison.pause();
                     }
                     onMetadataLoaded: (md) => {
                         Qt.callLater(fileLoaded, md);
@@ -850,7 +867,7 @@ Item {
                 property bool show: false;
                 onShowChanged: settings.setValue("stabOverviewSplit", show);
                 Component.onCompleted: show = settings.value("stabOverviewSplit", false);
-                visible: show && fovOverviewBtn.checked;
+                visible: show && fovOverviewBtn.checked && !root.o4CompareShown;
                 readonly property real ratio: 1 + 1 / window.stab.fovSlider.value;
                 onRatioChanged: {
                     if (visible) {
@@ -870,6 +887,35 @@ Item {
                 TapHandler {
                     onTapped: timeline.focus = true;
                     onDoubleTapped: root.fullScreen = root.fullScreen? 0 : 1;
+                }
+            }
+            Item {
+                id: compareParent;
+                visible: root.o4CompareShown && window.motionData && window.motionData.o4RepairAvailable;
+                width: vidParent.width;
+                height: vidParent.height;
+                Loader {
+                    id: compareLoader;
+                    anchors.fill: parent;
+                    active: compareParent.visible;
+                    sourceComponent: MDKVideo {
+                        id: compareVid;
+                        muted: true;
+                        backgroundColor: "#111111";
+                        Component.onCompleted: {
+                            controller.init_o4_compare_player(this);
+                        }
+                        onMetadataLoaded: {
+                            setTimestamp(vid.timestamp);
+                            if (vid.playing) play();
+                        }
+                    }
+                }
+                BasicText {
+                    text: qsTr("Before repair");
+                    anchors.left: parent.left;
+                    anchors.top: parent.top;
+                    color: "white";
                 }
             }
         }
@@ -1114,6 +1160,19 @@ Item {
                     TapHandler {
                         acceptedModifiers: Qt.ControlModifier
                         onTapped: { if (fovOverviewBtn.checked) { secondPreview.show = !secondPreview.show; fovOverviewBtn.checked = false; vid.forceRedraw(); } }
+                    }
+                }
+
+                Button {
+                    visible: window.motionData && window.motionData.o4RepairAvailable;
+                    text: root.o4CompareShown? qsTr("Close compare") : qsTr("Compare repair");
+                    onClicked: {
+                        root.o4CompareShown = !root.o4CompareShown;
+                        if (root.o4CompareShown) {
+                            stabEnabledBtn.checked = true;
+                            fovOverviewBtn.checked = false;
+                            if (compareLoader.item) compareLoader.item.setTimestamp(vid.timestamp);
+                        }
                     }
                 }
 

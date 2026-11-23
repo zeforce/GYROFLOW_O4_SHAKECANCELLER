@@ -1419,6 +1419,23 @@ Do you want to submit your profile?</source>
   </context>
   <context>
     <name>MotionData</name>
+    <message><source>Gyro model (estimated)</source><translation>陀螺仪型号（推算）</translation></message>
+    <message><source>Unknown</source><translation>无法判断</translation></message>
+    <message><source>Insufficient quiet data</source><translation>静止数据不足</translation></message>
+    <message><source>Noise %1 mdeg/s/√Hz (estimated)</source><translation>噪声 %1 mdeg/s/√Hz（推算）</translation></message>
+    <message><source>O4 quaternion repair</source><translation>O4 陀螺仪修复</translation></message>
+    <message><source>Detect regions</source><translation>检测异常区间</translation></message>
+    <message><source>Add at playhead</source><translation>在播放位置添加</translation></message>
+    <message><source>Keep original</source><translation>保持原样</translation></message>
+    <message><source>Short smoothing</source><translation>短时平滑</translation></message>
+    <message><source>Medium smoothing</source><translation>中时平滑</translation></message>
+    <message><source>Rate attenuation</source><translation>角速度衰减</translation></message>
+    <message><source>Burst bridge</source><translation>突发桥接</translation></message>
+    <message><source>Selective residual</source><translation>选择性残差</translation></message>
+    <message><source>Flatten motion</source><translation>压平运动</translation></message>
+    <message><source>to</source><translation>至</translation></message>
+    <message><source>Delete region</source><translation>删除区间</translation></message>
+    <message><source>Apply regions</source><translation>应用修复</translation></message>
     <message>
       <location filename="../../src/ui/menu/MotionData.qml" line="11"/>
       <source>Motion data</source>
@@ -4066,6 +4083,8 @@ Are you sure you want to continue?</source>
   </context>
   <context>
     <name>VideoArea</name>
+    <message><source>Before repair</source><translation>修复前</translation></message>
+    <message><source>After repair</source><translation>修复后</translation></message>
     <message>
       <location filename="../../src/ui/VideoArea.qml" line="451"/>
       <source>There&apos;s a %1 file associated with this video, do you want to load it?</source>

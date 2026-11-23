@@ -1417,6 +1417,55 @@ impl StabilizationManager {
         GyroSource::integrate_shared(&self.gyro, Integration::ApplyTransforms);
         self.invalidate_smoothing();
     }
+
+    pub fn o4_repair_regions(&self) -> Vec<gyro_source::o4_repair::RepairRegion> {
+        self.gyro.read().o4_repair_regions.clone()
+    }
+
+    pub fn detect_o4_repair_regions(&self) -> Vec<gyro_source::o4_repair::RepairRegion> {
+        let gyro = self.gyro.read();
+        if !gyro.is_o4_video() { return Vec::new(); }
+        gyro_source::o4_repair::detect(&gyro.uncorrected_quaternions, gyro.duration_ms)
+    }
+
+    pub fn set_o4_repair_regions(&self, regions: Vec<gyro_source::o4_repair::RepairRegion>) -> bool {
+        let mut gyro = self.gyro.write();
+        if !gyro.is_o4_video() || regions.iter().any(|r| !r.valid()) { return false; }
+        if gyro.uncorrected_quaternions.is_empty() { return false; }
+        gyro.o4_repair_regions = regions;
+        gyro.refresh_o4_repair();
+        drop(gyro);
+        self.invalidate_smoothing();
+        true
+    }
+
+    pub fn o4_before_preview(&self) -> StabilizationManager {
+        let preview = self.get_cloned();
+        {
+            let mut gyro = preview.gyro.write();
+            gyro.quaternions = gyro.uncorrected_quaternions.clone();
+            gyro.o4_repair_regions.clear();
+        }
+        preview.stabilization.write().kernel_flags = self.stabilization.read().kernel_flags.clone();
+        {
+            let params = preview.params.read();
+            let mut stabilization = preview.stabilization.write();
+            stabilization.init_size(params.size, params.output_size);
+            stabilization.cache_frame_transform = true;
+        }
+        // Keep the same crop/zoom as the edited preview so both panes can be
+        // compared pixel for pixel. Only the motion compensation differs.
+        preview.recompute_smoothness();
+        {
+            let live = self.params.read();
+            let mut before = preview.params.write();
+            before.fovs = live.fovs.clone();
+            before.minimal_fovs = live.minimal_fovs.clone();
+            before.min_fov = live.min_fov;
+        }
+        preview.recompute_undistortion();
+        preview
+    }
     /// Integrates the motion data again with another method (`GyroSource::integration_method`)
     pub fn set_integration_method(&self, method: usize) {
         self.gyro.write().integration_method = method;
@@ -2118,6 +2167,7 @@ impl StabilizationManager {
                 "optical_tracking": self.optical_tracking.read().name(),
                 "optical_removed_tracks": *self.optical_removed_tracks.read(),
                 "ignore_file_motion": gyro.ignores_file_motion(),
+                "o4_repair_regions": gyro.o4_repair_regions,
             },
 
             "offsets": gyro.file_offsets(), // timestamp, offset value
@@ -2526,6 +2576,14 @@ impl StabilizationManager {
                     if let Some(v) = obj.get("rotation")     { let v: [f64; 3] = serde_json::from_value(v.clone()).unwrap_or_default(); gyro.imu_transforms.set_imu_rotation(v[0], v[1], v[2]); }
                     if let Some(v) = obj.get("acc_rotation") { let v: [f64; 3] = serde_json::from_value(v.clone()).unwrap_or_default(); gyro.imu_transforms.set_acc_rotation(v[0], v[1], v[2]); }
                     if let Some(v) = obj.get("gyro_bias")    { gyro.imu_transforms.gyro_bias = serde_json::from_value(v.clone()).ok(); }
+                    if let Some(v) = obj.get("o4_repair_regions") {
+                        if let Ok(regions) = serde_json::from_value::<Vec<gyro_source::o4_repair::RepairRegion>>(v.clone()) {
+                            if gyro.is_o4_video() && regions.iter().all(|r| r.valid()) {
+                                gyro.o4_repair_regions = regions;
+                                gyro.refresh_o4_repair();
+                            }
+                        }
+                    }
                     if let Some(v) = obj.get("optical_correction_strength").and_then(|x| x.as_f64()) { self.optical_settings.write().strength = v; }
                     if let Some(v) = obj.get("optical_correction_per_frame").and_then(|x| x.as_bool()) { self.optical_settings.write().per_frame = v; }
                     if let Some(v) = obj.get("optical_tracking").and_then(|x| x.as_str()).and_then(gyro_source::TrackingMethod::from_name) { *self.optical_tracking.write() = v; }

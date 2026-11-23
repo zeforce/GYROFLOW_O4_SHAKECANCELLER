@@ -11,6 +11,7 @@ Item {
     id: root;
     property var trimRanges: [];
     property var prevTrimRanges: [];
+    property var repairRegions: [];
     property bool trimActive: trimRanges.length > 0;
     property bool restrictTrim: true;
 
@@ -839,6 +840,95 @@ Item {
                     onChangeTrimStart: (val) => { root.setTrimStart(index, val); };
                     onChangeTrimEnd:   (val) => { root.setTrimEnd  (index, val); };
                     onReset: root.resetTrim();
+                }
+            }
+        }
+
+        Item {
+            id: repairOverlay;
+            anchors.fill: parent;
+            clip: false;
+            visible: window.motionData && window.motionData.o4RepairAvailable && root.orgDurationMs > 0;
+            Repeater {
+                model: root.repairRegions.length;
+                delegate: Item {
+                    id: repairItem;
+                    required property int index;
+                    readonly property var region: root.repairRegions[index];
+                    readonly property real leftX: root.mapToVisibleArea(region.start_ms / root.orgDurationMs) * repairOverlay.width;
+                    readonly property real rightX: root.mapToVisibleArea(region.end_ms / root.orgDurationMs) * repairOverlay.width;
+                    readonly property bool selected: window.motionData.selectedRepairRegion === index;
+                    x: Math.max(0, leftX);
+                    width: Math.max(2 * dpiScale, Math.min(repairOverlay.width, rightX) - x);
+                    y: (root.fullScreen || window.isMobileLayout? 0 : 35) * dpiScale;
+                    height: 17 * dpiScale;
+                    visible: rightX > 0 && leftX < repairOverlay.width;
+                    z: selected? 2 : 1;
+                    Rectangle {
+                        anchors.left: parent.left;
+                        anchors.right: parent.right;
+                        anchors.top: parent.top;
+                        height: 8 * dpiScale;
+                        radius: 2 * dpiScale;
+                        color: repairItem.region.mode === "off"? "#dd9a39" : "#44c78d";
+                        border.width: repairItem.selected? 1 * dpiScale : 0;
+                        border.color: "white";
+                    }
+                    MouseArea {
+                        anchors.fill: parent;
+                        cursorShape: Qt.PointingHandCursor;
+                        onClicked: window.motionData.selectedRepairRegion = repairItem.index;
+                    }
+                    Rectangle {
+                        visible: repairItem.selected;
+                        width: 5 * dpiScale;
+                        height: 15 * dpiScale;
+                        x: -width / 2;
+                        radius: 2 * dpiScale;
+                        color: styleAccentColor;
+                        MouseArea {
+                            id: leftGrip;
+                            anchors.fill: parent;
+                            anchors.margins: -7 * dpiScale;
+                            cursorShape: Qt.SizeHorCursor;
+                            property real initialMs: 0;
+                            property real initialX: 0;
+                            onPressed: (mouse) => { window.motionData.o4TimeDragActive = true; initialMs = repairItem.region.start_ms; initialX = mapToItem(repairOverlay, mouse.x, mouse.y).x; }
+                            onPositionChanged: (mouse) => {
+                                if (!pressed) return;
+                                const x = mapToItem(repairOverlay, mouse.x, mouse.y).x;
+                                const msPerPixel = root.orgDurationMs * (root.visibleAreaRight - root.visibleAreaLeft) / repairOverlay.width;
+                                const ms = Math.max(0, Math.min(repairItem.region.end_ms - 10, initialMs + (x - initialX) * msPerPixel));
+                                window.motionData.previewO4RegionTime(repairItem.index, ms, repairItem.region.end_ms);
+                            }
+                            onReleased: { window.motionData.keepO4Regions(window.motionData.o4RepairRegions); window.motionData.o4TimeDragActive = false; Qt.callLater(window.motionData.syncO4TimeFields); }
+                        }
+                    }
+                    Rectangle {
+                        visible: repairItem.selected;
+                        width: 5 * dpiScale;
+                        height: 15 * dpiScale;
+                        x: repairItem.width - width / 2;
+                        radius: 2 * dpiScale;
+                        color: styleAccentColor;
+                        MouseArea {
+                            id: rightGrip;
+                            anchors.fill: parent;
+                            anchors.margins: -7 * dpiScale;
+                            cursorShape: Qt.SizeHorCursor;
+                            property real initialMs: 0;
+                            property real initialX: 0;
+                            onPressed: (mouse) => { window.motionData.o4TimeDragActive = true; initialMs = repairItem.region.end_ms; initialX = mapToItem(repairOverlay, mouse.x, mouse.y).x; }
+                            onPositionChanged: (mouse) => {
+                                if (!pressed) return;
+                                const x = mapToItem(repairOverlay, mouse.x, mouse.y).x;
+                                const msPerPixel = root.orgDurationMs * (root.visibleAreaRight - root.visibleAreaLeft) / repairOverlay.width;
+                                const ms = Math.min(root.orgDurationMs, Math.max(repairItem.region.start_ms + 10, initialMs + (x - initialX) * msPerPixel));
+                                window.motionData.previewO4RegionTime(repairItem.index, repairItem.region.start_ms, ms);
+                            }
+                            onReleased: { window.motionData.keepO4Regions(window.motionData.o4RepairRegions); window.motionData.o4TimeDragActive = false; Qt.callLater(window.motionData.syncO4TimeFields); }
+                        }
+                    }
                 }
             }
         }

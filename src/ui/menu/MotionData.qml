@@ -24,6 +24,82 @@ MenuItem {
     property string filename: "";
     property string detectedFormat: "";
     property url lastSelectedFile: "";
+    property bool o4RepairAvailable: false;
+    property var o4GyroEstimate: ({ label: "Unknown", detail: "" });
+    property var o4RepairRegions: [];
+    property int selectedRepairRegion: -1;
+    property bool o4CandidatesShown: false;
+    property bool o4ProjectRegionsLoaded: false;
+    property bool o4TimeDragActive: false;
+
+    function refreshO4Repair(): void {
+        o4RepairAvailable = controller.o4_repair_supported();
+        try { o4GyroEstimate = JSON.parse(controller.get_o4_gyro_estimate()); }
+        catch (_) { o4GyroEstimate = ({ label: "Unknown", detail: "" }); }
+        try { o4RepairRegions = JSON.parse(controller.get_o4_repair_regions()); }
+        catch (_) { o4RepairRegions = []; }
+        if (o4RepairAvailable && o4RepairRegions.length === 0 && !o4CandidatesShown && !o4ProjectRegionsLoaded) {
+            try { o4RepairRegions = JSON.parse(controller.detect_o4_repair_regions()); }
+            catch (_) { o4RepairRegions = []; }
+            o4CandidatesShown = true;
+        }
+        selectedRepairRegion = o4RepairRegions.length? 0 : -1;
+        window.videoArea.timeline.repairRegions = o4RepairRegions;
+    }
+    function keepO4Regions(regions: var): void {
+        if (!controller.set_o4_repair_regions(JSON.stringify(regions))) return;
+        o4RepairRegions = regions;
+        o4CandidatesShown = true;
+        o4ProjectRegionsLoaded = false;
+        window.videoArea.timeline.repairRegions = regions;
+        window.videoArea.vid.forceRedraw();
+    }
+    function previewO4RegionTime(index: int, startMs: real, endMs: real): void {
+        if (index < 0 || index >= o4RepairRegions.length) return;
+        const next = o4RepairRegions.map(x => Object.assign({}, x));
+        next[index].start_ms = Math.round(startMs);
+        next[index].end_ms = Math.round(endMs);
+        o4RepairRegions = next;
+        window.videoArea.timeline.repairRegions = next;
+    }
+    function showO4Candidates(regions: var): void {
+        o4RepairRegions = regions;
+        o4CandidatesShown = true;
+        o4ProjectRegionsLoaded = false;
+        selectedRepairRegion = regions.length? 0 : -1;
+        window.videoArea.timeline.repairRegions = regions;
+        // A scan only marks candidates. Keep already applied edits until the user changes a region.
+    }
+    function updateO4Region(index: int, field: string, value: var): void {
+        if (index < 0 || index >= o4RepairRegions.length) return;
+        const next = o4RepairRegions.map(x => Object.assign({}, x));
+        next[index][field] = value;
+        keepO4Regions(next);
+    }
+    function setO4RegionTime(index: int, startMs: real, endMs: real): void {
+        if (index < 0 || index >= o4RepairRegions.length) return;
+        const duration = window.videoArea.timeline.orgDurationMs;
+        if (!isFinite(startMs) || !isFinite(endMs) || startMs < 0 || endMs <= startMs || endMs > duration) return;
+        const next = o4RepairRegions.map(x => Object.assign({}, x));
+        next[index].start_ms = Math.round(startMs);
+        next[index].end_ms = Math.round(endMs);
+        keepO4Regions(next);
+        repairStart.text = (next[index].start_ms / 1000).toFixed(2);
+        repairEnd.text = (next[index].end_ms / 1000).toFixed(2);
+    }
+    function syncO4TimeFields(): void {
+        if (o4TimeDragActive) return;
+        const i = selectedRepairRegion;
+        if (i < 0 || i >= o4RepairRegions.length) {
+            repairStart.text = "";
+            repairEnd.text = "";
+            return;
+        }
+        if (!repairStart.activeFocus) repairStart.text = (o4RepairRegions[i].start_ms / 1000).toFixed(2);
+        if (!repairEnd.activeFocus) repairEnd.text = (o4RepairRegions[i].end_ms / 1000).toFixed(2);
+    }
+    onSelectedRepairRegionChanged: Qt.callLater(syncO4TimeFields);
+    onO4RepairRegionsChanged: Qt.callLater(syncO4TimeFields);
 
     FileDialog {
         id: fileDialog;
@@ -45,6 +121,10 @@ MenuItem {
 
     function loadGyroflow(obj: var): void {
         const gyro = obj.gyro_source || { };
+        if (gyro.hasOwnProperty("o4_repair_regions")) {
+            o4CandidatesShown = true;
+            o4ProjectRegionsLoaded = true;
+        }
         if (gyro && Object.keys(gyro).length > 0) {
             if (gyro.rotation && gyro.rotation.length == 3) {
                 p.value = gyro.rotation[0];
@@ -94,6 +174,7 @@ MenuItem {
             focb.checked = +stab.frame_offset > 0;
             fo.value = +stab.frame_offset;
         }
+        Qt.callLater(root.refreshO4Repair);
     }
     function setGyroLpf(v: real): void {
         lpf.value = v;
@@ -117,6 +198,8 @@ MenuItem {
                 return;
             }
             root.filename = filename || "";
+            root.o4CandidatesShown = false;
+            root.o4ProjectRegionsLoaded = false;
             root.detectedFormat = camera || "";
             info.updateEntry("File name", filename || "---");
             info.updateEntry("Detected format", camera || "---");
@@ -152,6 +235,7 @@ MenuItem {
             Qt.callLater(controller.recompute_gyro);
 
             Qt.callLater(window.videoArea.timeline.updateDurations);
+            Qt.callLater(root.refreshO4Repair);
 
             currentLog.preventChange = true;
             if (additional_data.usable_logs && additional_data.usable_logs.length > 0) {
@@ -215,6 +299,125 @@ MenuItem {
             "File name": "---",
             "Detected format": "---"
         })
+    }
+    Label {
+        visible: root.o4RepairAvailable;
+        text: qsTr("Gyro model (estimated)");
+        BasicText {
+            text: (root.o4GyroEstimate.label === "Unknown"? qsTr("Unknown") : root.o4GyroEstimate.label)
+                  + (root.o4GyroEstimate.noise !== undefined? " · " + qsTr("Noise %1 mdeg/s/√Hz (estimated)").arg(root.o4GyroEstimate.noise.toFixed(1)) : "")
+                  + (root.o4GyroEstimate.reason === "Insufficient quiet data"? " · " + qsTr("Insufficient quiet data") : "");
+            wrapMode: Text.Wrap;
+            width: root.width;
+        }
+    }
+    Label {
+        text: qsTr("O4 quaternion repair");
+        visible: root.o4RepairAvailable;
+        Row {
+            spacing: 5 * dpiScale;
+            Button {
+                text: qsTr("Detect regions");
+                onClicked: {
+                    try { root.o4RepairRegions = JSON.parse(controller.detect_o4_repair_regions()); }
+                    catch (_) { root.o4RepairRegions = []; }
+                    root.o4CandidatesShown = true;
+                    root.showO4Candidates(root.o4RepairRegions);
+                }
+            }
+            Button {
+                text: qsTr("Add at playhead");
+                onClicked: {
+                    const t = window.videoArea.vid.timestamp;
+                    const end = window.videoArea.timeline.orgDurationMs;
+                    const next = root.o4RepairRegions.concat([{ start_ms: Math.max(0, t - 500), end_ms: Math.min(end, t + 500), mode: "off", strength: 0.65 }]);
+                    root.keepO4Regions(next);
+                    root.selectedRepairRegion = root.o4RepairRegions.length - 1;
+                }
+            }
+        }
+    }
+    Repeater {
+        model: root.o4RepairAvailable? root.o4RepairRegions.length : 0;
+        delegate: Column {
+            required property int index;
+            width: root.width;
+            spacing: 3 * dpiScale;
+            Button {
+                text: ((root.o4RepairRegions[index].start_ms / 1000).toFixed(2) + "–" + (root.o4RepairRegions[index].end_ms / 1000).toFixed(2) + "s");
+                accent: root.selectedRepairRegion === index;
+                onClicked: {
+                    root.selectedRepairRegion = index;
+                    window.videoArea.vid.setTimestamp(root.o4RepairRegions[index].start_ms);
+                }
+            }
+            Row {
+                spacing: 5 * dpiScale;
+                ComboBox {
+                    width: 180 * dpiScale;
+                    model: [qsTr("Keep original"), qsTr("Short smoothing"), qsTr("Medium smoothing"), qsTr("Rate attenuation"), qsTr("Burst bridge"), qsTr("Selective residual"), qsTr("Flatten motion")];
+                    currentIndex: ["off", "short_smoothing", "medium_smoothing", "rate_attenuation", "burst_bridge", "selective_residual", "flatten"].indexOf(root.o4RepairRegions[index].mode);
+                    onActivated: (selectedIndex) => root.updateO4Region(index, "mode", ["off", "short_smoothing", "medium_smoothing", "rate_attenuation", "burst_bridge", "selective_residual", "flatten"][selectedIndex]);
+                }
+                NumberField {
+                    width: 75 * dpiScale;
+                    from: 0; to: 100; precision: 0; unit: "%";
+                    value: Math.round(root.o4RepairRegions[index].strength * 100);
+                    onEditingFinished: root.updateO4Region(index, "strength", value / 100);
+                }
+            }
+        }
+    }
+    Row {
+        visible: root.o4RepairAvailable && root.selectedRepairRegion >= 0;
+        spacing: 5 * dpiScale;
+        TextField {
+            id: repairStart;
+            width: 80 * dpiScale;
+            validator: DoubleValidator { bottom: 0; top: Math.max(0, window.videoArea.timeline.orgDurationMs / 1000); decimals: 3; }
+            selectByMouse: true;
+            onEditingFinished: {
+                const i = root.selectedRepairRegion;
+                if (i >= 0) root.setO4RegionTime(i, Number(text.replace(",", ".")) * 1000, root.o4RepairRegions[i].end_ms);
+                root.syncO4TimeFields();
+            }
+        }
+        BasicText { text: qsTr("to"); anchors.verticalCenter: parent.verticalCenter; }
+        TextField {
+            id: repairEnd;
+            width: 80 * dpiScale;
+            validator: DoubleValidator { bottom: 0; top: Math.max(0, window.videoArea.timeline.orgDurationMs / 1000); decimals: 3; }
+            selectByMouse: true;
+            onEditingFinished: {
+                const i = root.selectedRepairRegion;
+                if (i >= 0) root.setO4RegionTime(i, root.o4RepairRegions[i].start_ms, Number(text.replace(",", ".")) * 1000);
+                root.syncO4TimeFields();
+            }
+        }
+        Button {
+            text: qsTr("Delete region");
+            onClicked: {
+                root.keepO4Regions(root.o4RepairRegions.filter((_, i) => i !== root.selectedRepairRegion));
+                root.selectedRepairRegion = root.o4RepairRegions.length? 0 : -1;
+            }
+        }
+    }
+    Row {
+        visible: root.o4RepairAvailable && root.o4RepairRegions.length > 0;
+        spacing: 5 * dpiScale;
+        Button {
+            text: qsTr("Apply regions");
+            onClicked: {
+                root.keepO4Regions(root.o4RepairRegions);
+            }
+        }
+        Button {
+            text: qsTr("Clear");
+            onClicked: {
+                root.keepO4Regions([]);
+                root.selectedRepairRegion = -1;
+            }
+        }
     }
     Label {
         position: Label.LeftPosition;

@@ -115,6 +115,12 @@ pub struct Controller {
     set_imu_orientation: qt_method!(fn(&self, orientation: String)),
     set_imu_bias: qt_method!(fn(&self, bx: f64, by: f64, bz: f64)),
     recompute_gyro: qt_method!(fn(&self)),
+    o4_repair_supported: qt_method!(fn(&self) -> bool),
+    get_o4_gyro_estimate: qt_method!(fn(&self) -> QString),
+    get_o4_repair_regions: qt_method!(fn(&self) -> QString),
+    detect_o4_repair_regions: qt_method!(fn(&self) -> QString),
+    set_o4_repair_regions: qt_method!(fn(&mut self, regions: QString) -> bool),
+    init_o4_compare_player: qt_method!(fn(&self, player: QJSValue)),
 
     analyze_optically: qt_method!(fn(&mut self)),
     set_optical_correction_enabled: qt_method!(fn(&self, enabled: bool)),
@@ -1721,6 +1727,64 @@ impl Controller {
     wrap_simple_method!(set_sync_lpf, v: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_imu_bias, bx: f64, by: f64, bz: f64; recompute; chart_data_changed);
     wrap_simple_method!(recompute_gyro,; recompute; chart_data_changed);
+
+    fn o4_repair_supported(&self) -> bool { self.stabilizer.gyro.read().is_o4_video() }
+    fn get_o4_gyro_estimate(&self) -> QString {
+        let gyro = self.stabilizer.gyro.read();
+        let value = if gyro.is_o4_video() {
+            gyroflow_core::gyro_source::o4_repair::estimate_gyro(&gyro.uncorrected_quaternions)
+        } else { serde_json::json!({"label":"Unknown", "reason":""}) };
+        QString::from(value.to_string())
+    }
+    fn get_o4_repair_regions(&self) -> QString {
+        QString::from(serde_json::to_string(&self.stabilizer.o4_repair_regions()).unwrap_or_default())
+    }
+    fn detect_o4_repair_regions(&self) -> QString {
+        QString::from(serde_json::to_string(&self.stabilizer.detect_o4_repair_regions()).unwrap_or_default())
+    }
+    fn set_o4_repair_regions(&mut self, regions: QString) -> bool {
+        let Ok(regions) = serde_json::from_str::<Vec<gyroflow_core::gyro_source::o4_repair::RepairRegion>>(&regions.to_string()) else { return false; };
+        if !self.stabilizer.set_o4_repair_regions(regions) { return false; }
+        self.request_recompute();
+        self.chart_data_changed();
+        true
+    }
+    fn init_o4_compare_player(&self, player: QJSValue) {
+        use gyroflow_core::gpu::{BufferDescription, Buffers};
+        let Some(vid) = player.to_qobject::<MDKVideoItem>() else { return; };
+        let vid1 = unsafe { &mut *vid.as_ptr() };
+        let vid = unsafe { &mut *vid.as_ptr() };
+        vid.setUrl(QUrl::from(QString::from(self.stabilizer.input_file.read().url.clone())), QString::from(""));
+        vid.setMuted(true);
+        let live = self.stabilizer.clone();
+        let cached = Arc::new(parking_lot::Mutex::new(None::<((usize, u64, u64, u64), Arc<StabilizationManager>)>));
+        vid.readyForProcessing(Box::new(|| true));
+        vid.onProcessTexture(Box::new(move |frame, timestamp_ms, width, height, backend_id, _, _, _, _, _| {
+            if width < 4 || height < 4 || backend_id == 0 { return false; }
+            if !live.gyro.read().is_o4_video() { return false; }
+            // A recompute also follows changes to smoothing, lens, sync and crop settings.
+            // The before view must use those same settings with only the O4 repair removed.
+            let key = (Arc::as_ptr(&live.gyro.read().quaternions) as usize,
+                       live.current_compute_id.load(SeqCst),
+                       live.smoothing_checksum.load(SeqCst),
+                       live.zooming_checksum.load(SeqCst));
+            let mut cached = cached.lock();
+            if cached.as_ref().is_none_or(|(previous, _)| *previous != key) {
+                *cached = Some((key, Arc::new(live.o4_before_preview())));
+            }
+            let before = cached.as_ref().unwrap().1.clone();
+            drop(cached);
+            let mut buffers = Buffers {
+                input: BufferDescription { size: (width as usize, height as usize, width as usize * 4), ..Default::default() },
+                output: BufferDescription { size: (width as usize, height as usize, width as usize * 4), ..Default::default() },
+            };
+            let (offset, fps) = { let params = before.params.read(); (params.frame_offset, params.fps) };
+            let frame = (frame as i32 + offset).max(0) as usize;
+            let time = if fps > 0.0 { timestamp_ms + (offset as f64 / fps * 1000.0).round() } else { timestamp_ms };
+            let _ = qrhi_undistort::render(vid1.get_mdkplayer(), time, frame, width, height, before, &mut buffers);
+            true
+        }));
+    }
     wrap_simple_method!(set_optical_correction_enabled, enabled: bool; recompute; chart_data_changed);
 
     fn clear_optical_correction(&mut self) {
